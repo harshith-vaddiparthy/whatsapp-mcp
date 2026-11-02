@@ -18,12 +18,17 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
-	"github.com/mdp/qrterminal"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/png"
+	"rsc.io/qr"
 
 	"bytes"
 
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -641,7 +646,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	}
 
 	// Download the media using whatsmeow client
-	mediaData, err := client.Download(downloader)
+	mediaData, err := client.Download(context.Background(), downloader)
 	if err != nil {
 		return false, "", "", "", fmt.Errorf("failed to download media: %v", err)
 	}
@@ -775,7 +780,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	})
 
 	// Start the server
-	serverAddr := fmt.Sprintf(":%d", port)
+	serverAddr := fmt.Sprintf("127.0.0.1:%d", port)
 	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
 
 	// Run server in a goroutine so it doesn't block
@@ -800,14 +805,14 @@ func main() {
 		return
 	}
 
-	container, err := sqlstore.New("sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
+	container, err := sqlstore.New(context.Background(), "sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
 		return
 	}
 
 	// Get device store - This contains session information
-	deviceStore, err := container.GetFirstDevice()
+	deviceStore, err := container.GetFirstDevice(context.Background())
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// No device exists, create one
@@ -818,6 +823,15 @@ func main() {
 			return
 		}
 	}
+
+	// Refresh protocol version via the library's official WhatsApp web lookup.
+	latestVersion, versionErr := whatsmeow.GetLatestVersion(context.Background(), &http.Client{Timeout: 25 * time.Second})
+	if versionErr != nil {
+		logger.Errorf("Failed to refresh WhatsApp version: %v", versionErr)
+		return
+	}
+	store.SetWAVersion(*latestVersion)
+	logger.Infof("WhatsApp client version refreshed")
 
 	// Create client instance
 	client := whatsmeow.NewClient(deviceStore, logger)
@@ -870,7 +884,34 @@ func main() {
 		for evt := range qrChan {
 			if evt.Event == "code" {
 				fmt.Println("\nScan this QR code with your WhatsApp app:")
-				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
+				code, qrErr := qr.Encode(evt.Code, qr.L)
+				if qrErr != nil {
+					logger.Errorf("QR encoding failed")
+					return
+				}
+				canvas := image.NewGray(image.Rect(0, 0, 4096, 4096))
+				draw.Draw(canvas, canvas.Bounds(), &image.Uniform{color.White}, image.Point{}, draw.Src)
+				scale := 4096 / (code.Size + 8)
+				offset := (4096 - code.Size*scale) / 2
+				for y := 0; y < code.Size; y++ {
+					for x := 0; x < code.Size; x++ {
+						if code.Black(x, y) {
+							draw.Draw(canvas, image.Rect(offset+x*scale, offset+y*scale, offset+(x+1)*scale, offset+(y+1)*scale), &image.Uniform{color.Black}, image.Point{}, draw.Src)
+						}
+					}
+				}
+				qrFile, qrErr := os.OpenFile("store/pairing-qr.png", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+				if qrErr != nil {
+					logger.Errorf("QR file creation failed")
+					return
+				}
+				qrErr = png.Encode(qrFile, canvas)
+				qrFile.Close()
+				if qrErr != nil {
+					logger.Errorf("QR image write failed")
+					return
+				}
+				fmt.Printf("PAIRING_QR_READY valid_for_seconds=%.0f\n", evt.Timeout.Seconds())
 			} else if evt.Event == "success" {
 				connected <- true
 				break
@@ -973,7 +1014,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 
 		// If we didn't get a name, try group info
 		if name == "" {
-			groupInfo, err := client.GetGroupInfo(jid)
+			groupInfo, err := client.GetGroupInfo(context.Background(), jid)
 			if err == nil && groupInfo.Name != "" {
 				name = groupInfo.Name
 			} else {
@@ -988,7 +1029,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 		logger.Infof("Getting name for contact: %s", chatJID)
 
 		// Just use contact info (full name)
-		contact, err := client.Store.Contacts.GetContact(jid)
+		contact, err := client.Store.Contacts.GetContact(context.Background(), jid)
 		if err == nil && contact.FullName != "" {
 			name = contact.FullName
 		} else if sender != "" {

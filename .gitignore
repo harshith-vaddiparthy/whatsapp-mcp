@@ -1,3 +1,28 @@
+# Private WhatsApp state, downloaded media and pairing credentials
+**/store/
 *.db
+*.db-*
+*.sqlite*
+*pairing*qr*
+# Local configuration, secrets, logs and machine-specific artifacts
+.env
+.env.*
+!.env.example
+*.log
+*.pem
+*.key
+credentials*.json
+*token*.json
 claude_desktop_config.json
-whatsapp.log
+local/
+.gcloud/
+# Build outputs and dependency caches
+bin/
+.go-cache/
+.go-mod/
+.go-path/
+.local-tools/
+.venv/
+__pycache__/
+*.py[cod]
+.DS_Store
